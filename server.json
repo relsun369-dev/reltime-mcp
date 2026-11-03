@@ -1,0 +1,23 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "name": "io.github.relsun369-dev/rel-time",
+  "title": "Rel-Time Protocol (Bitcoin & VDF Provenance)",
+  "description": "Zero-knowledge Bitcoin Mainnet & VDF timestamping, Passkey signing, Sun-Stamps, and tamper audits.",
+  "websiteUrl": "https://rel-time.com",
+  "repository": {
+    "url": "https://github.com/relsun369-dev/reltime-mcp",
+    "source": "github"
+  },
+  "version": "1.2.11",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@rel-time/mcp-server",
+      "version": "1.2.11",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
