@@ -1,6 +1,6 @@
 {
   "name": "@rel-time/mcp-server",
-  "version": "1.2.14",
+  "version": "1.2.15",
   "mcpName": "io.github.relsun369-dev/rel-time",
   "description": "Official Model Context Protocol (MCP) server for Rel-Time (rel-time.com) — Zero-Knowledge Bitcoin & VDF Provenance, Local File Hashing, and Sun-Stamp Generation for Claude, Cursor, Windsurf, and Antigravity.",
   "main": "index.js",

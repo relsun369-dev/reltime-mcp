@@ -56,8 +56,25 @@ let LAST_INVOICE_PACK = null;
 
 const SERVER_INFO = {
   name: "rel-time-mcp-server",
-  version: "1.2.14",
+  version: "1.2.15",
 };
+
+/**
+ * Redacts the local OS user home directory prefix (e.g., /Users/Name, /home/name, C:\Users\Name)
+ * to `~` so exported audit reports and payloads never leak local machine usernames.
+ */
+function redactHomePath(rawPath) {
+  if (!rawPath || typeof rawPath !== "string") return "";
+  const home = os.homedir();
+  if (home) {
+    const escapedHome = home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const homeRegex = new RegExp(`^${escapedHome}(?=[/\\\\]|$)`, "i");
+    if (homeRegex.test(rawPath)) {
+      return rawPath.replace(homeRegex, "~");
+    }
+  }
+  return rawPath.replace(/^(\/Users\/[^/]+|\/home\/[^/]+|[A-Za-z]:\\Users\\[^\\]+)(?=[/\\]|$)/, "~");
+}
 
 /**
  * Resolves a local file path, automatically matching macOS screenshot filenames
@@ -651,7 +668,7 @@ function generateAuditReportHtml(audit) {
           <div class="section-index">SECTION 01 // ZERO-KNOWLEDGE LOCAL FILE INTEGRITY MATRIX</div>
           <h2>Local Directory Cross-Reference</h2>
           <p class="section-sub">Target Path: <span class="mono" style="color:var(--text-secondary)">${escapeHtml(
-            localCheck.target_path
+            redactHomePath(localCheck.target_path)
           )}</span> · 0 Bytes Uploaded · Local SHA-256 vs. Bitcoin Ledger</p>
         </div>
         <div class="status-pill ${
@@ -3523,8 +3540,10 @@ async function executeTool(name, args = {}) {
 
     // Optional Zero-Knowledge Local File / Folder Integrity Verification
     let localPathVerification = null;
+    let resolvedVerifyTargetPath = null;
     if (args.verify_local_path) {
       const targetPath = resolveLocalFilePath(args.verify_local_path);
+      resolvedVerifyTargetPath = targetPath;
       if (!fs.existsSync(targetPath)) {
         throw new Error(`verify_local_path not found: ${targetPath}`);
       }
@@ -3637,7 +3656,7 @@ async function executeTool(name, args = {}) {
 
         fileAuditResults.push({
           file_name: fName,
-          file_path: fPath,
+          file_path: redactHomePath(fPath),
           size_bytes: bytes,
           size_human: sizeHuman,
           local_sha256: embeddedHash || rawSha256,
@@ -3655,7 +3674,7 @@ async function executeTool(name, args = {}) {
       }
 
       localPathVerification = {
-        target_path: targetPath,
+        target_path: redactHomePath(targetPath),
         summary: {
           total_files_scanned: fileAuditResults.length,
           verified_settled_count: vSettled,
@@ -3707,9 +3726,10 @@ async function executeTool(name, args = {}) {
     let reportDir = path.join(PASSKEY_CONFIG_DIR, "audits");
     if (args.output_dir) {
       reportDir = resolveLocalFilePath(args.output_dir);
-    } else if (localPathVerification) {
-      const tp = localPathVerification.target_path;
-      reportDir = fs.statSync(tp).isDirectory() ? tp : path.dirname(tp);
+    } else if (resolvedVerifyTargetPath) {
+      reportDir = fs.statSync(resolvedVerifyTargetPath).isDirectory()
+        ? resolvedVerifyTargetPath
+        : path.dirname(resolvedVerifyTargetPath);
     }
     if (!fs.existsSync(reportDir)) {
       fs.mkdirSync(reportDir, { recursive: true });
