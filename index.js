@@ -56,7 +56,7 @@ let LAST_INVOICE_PACK = null;
 
 const SERVER_INFO = {
   name: "rel-time-mcp-server",
-  version: "1.2.12",
+  version: "1.2.13",
 };
 
 /**
@@ -342,6 +342,30 @@ function injectPngVerifyBuffer(pngBuffer, verifyUrl) {
 }
 
 /**
+ * Builds an OS-safe filename (<= 240 UTF-8 bytes) so macOS/Linux 255-byte limits
+ * (`ENAMETOOLONG`) never fail on long AI-prompt filenames.
+ */
+function safeArtifactFilename(prefix, rawName, ext, hashHex = "") {
+  const candidate = `${prefix}${rawName}${ext}`;
+  if (Buffer.byteLength(candidate, "utf8") <= 240) {
+    return candidate;
+  }
+  const suffixTag = hashHex
+    ? `~${String(hashHex).slice(0, 8)}`
+    : `~${crypto.createHash("sha256").update(String(rawName), "utf8").digest("hex").slice(0, 8)}`;
+  const maxBodyBytes = Math.max(32, 240 - Buffer.byteLength(prefix, "utf8") - Buffer.byteLength(suffixTag, "utf8") - Buffer.byteLength(ext, "utf8"));
+  let trimmed = "";
+  let usedBytes = 0;
+  for (const ch of String(rawName)) {
+    const chBytes = Buffer.byteLength(ch, "utf8");
+    if (usedBytes + chBytes > maxBodyBytes) break;
+    trimmed += ch;
+    usedBytes += chBytes;
+  }
+  return `${prefix}${trimmed.trim()}${suffixTag}${ext}`;
+}
+
+/**
  * Stamps the Option 1A (+14° Bitcoin Tilt, pure crisp 64-ray Sun-Stamp, 0% glare, no pill) onto a local Image or PDF.
  * Returns { stamped: true, output_path, format } or { stamped: false, reason }.
  */
@@ -375,7 +399,9 @@ async function stampLocalFileOptionA(filePath, svgContent, customOutputPath = nu
     .replace(/<\/a>/gi, "");
 
   if (isImage) {
-    const outPath = customOutputPath ? path.resolve(customOutputPath) : path.join(dir, `reltime-stamped-${baseName}.png`);
+    const outPath = customOutputPath
+      ? path.resolve(customOutputPath)
+      : path.join(dir, safeArtifactFilename("reltime-stamped-", baseName, ".png", verifyHash));
     const img = sharp(filePath);
     const meta = await img.metadata();
     const w = (meta.autoOrient && meta.autoOrient.width) || meta.width || 1200;
@@ -410,7 +436,9 @@ async function stampLocalFileOptionA(filePath, svgContent, customOutputPath = nu
   }
 
   if (isPdf) {
-    const outPath = customOutputPath ? path.resolve(customOutputPath) : path.join(dir, `reltime-stamped-${baseName}.pdf`);
+    const outPath = customOutputPath
+      ? path.resolve(customOutputPath)
+      : path.join(dir, safeArtifactFilename("reltime-stamped-", baseName, ".pdf", verifyHash));
     const pdfBytes = fs.readFileSync(filePath);
     const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
     const pages = pdfDoc.getPages();
@@ -2521,7 +2549,10 @@ async function executeTool(name, args = {}) {
     let savedSvgPath = null;
     if (args.save_sun_stamp_svg !== false && svgContent) {
       try {
-        savedSvgPath = path.join(path.dirname(filePath), `reltime-stamp-${path.basename(filePath)}.svg`);
+        savedSvgPath = path.join(
+          path.dirname(filePath),
+          safeArtifactFilename("reltime-stamp-", path.basename(filePath), ".svg", clientHash)
+        );
         fs.writeFileSync(savedSvgPath, svgContent, "utf8");
       } catch (e) {
         savedSvgPath = null;
@@ -2531,7 +2562,7 @@ async function executeTool(name, args = {}) {
     // Save initial Doomsday Proof JSON alongside the file
     const savedProofJsonPath = path.join(
       path.dirname(filePath),
-      `reltime-doomsday-proof-${path.basename(filePath)}.json`
+      safeArtifactFilename("reltime-doomsday-proof-", path.basename(filePath), ".json", clientHash)
     );
     fs.writeFileSync(
       savedProofJsonPath,
@@ -2593,7 +2624,7 @@ async function executeTool(name, args = {}) {
         });
         savedCertificateHtmlPath = path.join(
           path.dirname(filePath),
-          `reltime-certificate-${path.basename(filePath)}.html`
+          safeArtifactFilename("reltime-certificate-", path.basename(filePath), ".html", clientHash)
         );
         fs.writeFileSync(savedCertificateHtmlPath, certHtml, "utf8");
         if (args.open_certificate_in_browser) {
@@ -2705,12 +2736,24 @@ async function executeTool(name, args = {}) {
     for (const fPath of targetFiles) {
       const relPath = path.relative(folderPath, fPath);
       const baseName = path.basename(fPath);
-      const sidecarProof = path.join(path.dirname(fPath), `reltime-doomsday-proof-${baseName}.json`);
-      const subfolderProof = path.join(proofsDir, `reltime-doomsday-proof-${relPath.replace(/[\\/]/g, "__")}.json`);
-      if (existingManifest.anchored_files[relPath] || fs.existsSync(sidecarProof) || fs.existsSync(subfolderProof)) {
+      const sidecarProof = path.join(
+        path.dirname(fPath),
+        safeArtifactFilename("reltime-doomsday-proof-", baseName, ".json")
+      );
+      const legacySidecarProof = path.join(path.dirname(fPath), `reltime-doomsday-proof-${baseName}.json`);
+      const subfolderProof = path.join(
+        proofsDir,
+        safeArtifactFilename("reltime-doomsday-proof-", relPath.replace(/[\\/]/g, "__"), ".json")
+      );
+      if (
+        existingManifest.anchored_files[relPath] ||
+        fs.existsSync(sidecarProof) ||
+        (Buffer.byteLength(`reltime-doomsday-proof-${baseName}.json`, "utf8") <= 255 && fs.existsSync(legacySidecarProof)) ||
+        fs.existsSync(subfolderProof)
+      ) {
         skipped.push(relPath);
       } else {
-        toProcess.push({ fPath, relPath, baseName, subfolderProof });
+        toProcess.push({ fPath, relPath, baseName, subfolderProof, sidecarProof });
       }
     }
 
@@ -2779,8 +2822,7 @@ async function executeTool(name, args = {}) {
           if (artifactMode === "proofs_subfolder") {
             fs.writeFileSync(item.subfolderProof, JSON.stringify(proofRecord, null, 2), "utf8");
           } else if (artifactMode === "full") {
-            const sidecarPath = path.join(path.dirname(item.fPath), `reltime-doomsday-proof-${item.baseName}.json`);
-            fs.writeFileSync(sidecarPath, JSON.stringify(proofRecord, null, 2), "utf8");
+            fs.writeFileSync(item.sidecarProof, JSON.stringify(proofRecord, null, 2), "utf8");
           }
 
           existingManifest.anchored_files[item.relPath] = proofRecord;
@@ -3232,10 +3274,12 @@ async function executeTool(name, args = {}) {
           if (item.startsWith(".")) continue;
           if (
             item.startsWith("reltime-stamp-") ||
+            item.startsWith("reltime-stamped-") ||
             item.startsWith("reltime-doomsday-proof-") ||
             item.startsWith("reltime-proof-") ||
             item.startsWith("reltime-certificate-") ||
             item.startsWith("reltime-audit-report-") ||
+            item.startsWith("reltime-audit-trail-") ||
             item === "reltime-batch-manifest.json" ||
             item === "_reltime_proofs"
           ) {
