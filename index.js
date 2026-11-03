@@ -56,7 +56,7 @@ let LAST_INVOICE_PACK = null;
 
 const SERVER_INFO = {
   name: "rel-time-mcp-server",
-  version: "1.2.13",
+  version: "1.2.14",
 };
 
 /**
@@ -667,6 +667,15 @@ function generateAuditReportHtml(audit) {
           }</span>
         </div>
       </div>
+      <div class="filter-bar no-print">
+        <div class="tab-group" id="localTabGroup">
+          <button class="filter-tab local-filter-tab active" onclick="setLocalPill(this, 'all')">All (${localCheck.summary.total_files_scanned})</button>
+          <button class="filter-tab local-filter-tab" onclick="setLocalPill(this, 'local-settled')">Settled (${localCheck.summary.verified_settled_count})</button>
+          <button class="filter-tab local-filter-tab" onclick="setLocalPill(this, 'local-pending')">Pending (${localCheck.summary.verified_pending_count})</button>
+          <button class="filter-tab local-filter-tab" onclick="setLocalPill(this, 'local-alert')">Unanchored / Modified (${localCheck.summary.unanchored_or_modified_count})</button>
+        </div>
+        <input id="localSearchInput" class="search-input" type="text" placeholder="QUERY FILE NAME / SHA-256 / PASSKEY / BLOCK..." oninput="resetAndFilterLocal()" />
+      </div>
       <div class="table-wrap">
         <table>
           <thead>
@@ -681,9 +690,16 @@ function generateAuditReportHtml(audit) {
               <th style="text-align:right">Receipt</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody id="localVerifyBody">
             ${localCheck.files
               .map((f, idx) => {
+                const localRowClass =
+                  f.integrity_status === "VERIFIED_SETTLED"
+                    ? "local-settled"
+                    : f.integrity_status === "VERIFIED_PENDING"
+                    ? "local-pending"
+                    : "local-alert";
+
                 const statusTag =
                   f.integrity_status === "VERIFIED_SETTLED"
                     ? `<span class="status-cell"><span class="dot dot-settled"></span><span class="mono" style="color:var(--text)">VERIFIED · SETTLED</span></span>`
@@ -710,7 +726,9 @@ function generateAuditReportHtml(audit) {
                   : `<span class="mono muted">—</span>`;
 
                 return `
-                <tr>
+                <tr class="local-row ${localRowClass}" data-search="${escapeHtml(
+                  `${f.file_name} ${f.local_sha256} ${f.signer_public_key || ""} ${f.block_height || ""} ${f.anchor_mode || ""}`.toLowerCase()
+                )}">
                   <td class="mono muted">${String(idx + 1).padStart(2, "0")}</td>
                   <td>
                     <span style="font-weight:600;color:var(--text)">${escapeHtml(f.file_name)}</span>
@@ -729,6 +747,26 @@ function generateAuditReportHtml(audit) {
               .join("")}
           </tbody>
         </table>
+      </div>
+      <div class="pagination-bar no-print" id="localPaginationBar">
+        <div class="pagination-info mono">
+          <span id="localRangeLabel">SHOWING 1–25</span>
+          <span class="muted">·</span>
+          <label class="mono muted" for="localPageSizeSelect">ROWS:</label>
+          <select id="localPageSizeSelect" class="page-size-select mono" onchange="changeLocalPageSize(this.value)">
+            <option value="25" selected>25 / PAGE</option>
+            <option value="50">50 / PAGE</option>
+            <option value="100">100 / PAGE</option>
+            <option value="0">ALL (FULL LIST)</option>
+          </select>
+        </div>
+        <div class="pagination-controls">
+          <button type="button" class="page-btn mono" id="localFirstBtn" onclick="goLocalPage(1)">[ ⟪ FIRST ]</button>
+          <button type="button" class="page-btn mono" id="localPrevBtn" onclick="stepLocalPage(-1)">[ ‹ PREV ]</button>
+          <span class="page-indicator mono" id="localPageIndicator">PAGE 1 OF 1</span>
+          <button type="button" class="page-btn mono" id="localNextBtn" onclick="stepLocalPage(1)">[ NEXT › ]</button>
+          <button type="button" class="page-btn mono" id="localLastBtn" onclick="goLocalLastPage()">[ LAST ⟫ ]</button>
+        </div>
       </div>
     </section>`
     : "";
@@ -1322,9 +1360,68 @@ function generateAuditReportHtml(audit) {
       font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
       font-size: 11.5px;
     }
+    .pagination-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 14px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+    }
+    .pagination-info {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+    .page-size-select {
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border-strong);
+      padding: 4px 8px;
+      font-size: 10.5px;
+      cursor: pointer;
+    }
+    .pagination-controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .page-btn {
+      background: var(--bg);
+      color: var(--text-secondary);
+      border: 1px solid var(--border-strong);
+      padding: 5px 10px;
+      font-size: 10.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.12s ease;
+    }
+    .page-btn:hover:not(:disabled) {
+      border-color: var(--amber);
+      color: var(--amber);
+    }
+    .page-btn:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+    .page-indicator {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text);
+      padding: 0 8px;
+    }
+    tr.filter-hidden,
+    tr.page-hidden {
+      display: none;
+    }
     @media print {
       body { background: var(--bg) !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; padding: 10px; }
       .no-print { display: none !important; }
+      tr.page-hidden { display: table-row !important; }
     }
   </style>
 </head>
@@ -1480,15 +1577,15 @@ function generateAuditReportHtml(audit) {
         </div>
       </div>
       <div class="filter-bar no-print">
-        <div class="tab-group">
-          <button class="filter-tab active" onclick="setPill(this, 'all')">All (${entries.length})</button>
-          <button class="filter-tab" onclick="setPill(this, 'status-settled')">Settled (${settledCount})</button>
-          <button class="filter-tab" onclick="setPill(this, 'status-pending')">Pending (${pendingCount})</button>
-          <button class="filter-tab" onclick="setPill(this, 'mode-biometric')">Passkey (${biometricCount})</button>
-          <button class="filter-tab" onclick="setPill(this, 'mode-temporal')">Temporal VDF (${temporalCount})</button>
-          <button class="filter-tab" onclick="setPill(this, 'mode-standard')">Standard (${standardCount})</button>
+        <div class="tab-group" id="ledgerTabGroup">
+          <button class="filter-tab ledger-filter-tab active" onclick="setPill(this, 'all')">All (${entries.length})</button>
+          <button class="filter-tab ledger-filter-tab" onclick="setPill(this, 'status-settled')">Settled (${settledCount})</button>
+          <button class="filter-tab ledger-filter-tab" onclick="setPill(this, 'status-pending')">Pending (${pendingCount})</button>
+          <button class="filter-tab ledger-filter-tab" onclick="setPill(this, 'mode-biometric')">Passkey (${biometricCount})</button>
+          <button class="filter-tab ledger-filter-tab" onclick="setPill(this, 'mode-temporal')">Temporal VDF (${temporalCount})</button>
+          <button class="filter-tab ledger-filter-tab" onclick="setPill(this, 'mode-standard')">Standard (${standardCount})</button>
         </div>
-        <input id="searchInput" class="search-input" type="text" placeholder="QUERY SHA-256 / T_INDEX / PASSKEY / TXID / BLOCK..." oninput="filterLedger()" />
+        <input id="searchInput" class="search-input" type="text" placeholder="QUERY SHA-256 / T_INDEX / PASSKEY / TXID / BLOCK..." oninput="resetAndFilterLedger()" />
       </div>
       <div class="table-wrap">
         <table>
@@ -1509,11 +1606,40 @@ function generateAuditReportHtml(audit) {
           </tbody>
         </table>
       </div>
+      <div class="pagination-bar no-print" id="ledgerPaginationBar">
+        <div class="pagination-info mono">
+          <span id="ledgerRangeLabel">SHOWING 1–25</span>
+          <span class="muted">·</span>
+          <label class="mono muted" for="ledgerPageSizeSelect">ROWS:</label>
+          <select id="ledgerPageSizeSelect" class="page-size-select mono" onchange="changeLedgerPageSize(this.value)">
+            <option value="25" selected>25 / PAGE</option>
+            <option value="50">50 / PAGE</option>
+            <option value="100">100 / PAGE</option>
+            <option value="0">ALL (FULL LIST)</option>
+          </select>
+        </div>
+        <div class="pagination-controls">
+          <button type="button" class="page-btn mono" id="ledgerFirstBtn" onclick="goLedgerPage(1)">[ ⟪ FIRST ]</button>
+          <button type="button" class="page-btn mono" id="ledgerPrevBtn" onclick="stepLedgerPage(-1)">[ ‹ PREV ]</button>
+          <span class="page-indicator mono" id="ledgerPageIndicator">PAGE 1 OF 1</span>
+          <button type="button" class="page-btn mono" id="ledgerNextBtn" onclick="stepLedgerPage(1)">[ NEXT › ]</button>
+          <button type="button" class="page-btn mono" id="ledgerLastBtn" onclick="goLedgerLastPage()">[ LAST ⟫ ]</button>
+        </div>
+      </div>
     </section>
   </div>
 
   <script>
     let currentFilter = 'all';
+    let ledgerPage = 1;
+    let ledgerPageSize = 25;
+    let ledgerTotalPages = 1;
+
+    let currentLocalFilter = 'all';
+    let localPage = 1;
+    let localPageSize = 25;
+    let localTotalPages = 1;
+
     function applyTheme(theme) {
       const root = document.documentElement;
       const btn = document.getElementById('themeToggleBtn');
@@ -1536,20 +1662,158 @@ function generateAuditReportHtml(audit) {
         if (saved === 'light' || saved === 'dark') applyTheme(saved);
       } catch (e) {}
     })();
+
+    // Section 01: Local Directory Cross-Reference Pagination & Filtering
+    function setLocalPill(btn, filter) {
+      currentLocalFilter = filter;
+      document.querySelectorAll('.local-filter-tab').forEach(el => el.classList.remove('active'));
+      btn.classList.add('active');
+      localPage = 1;
+      filterLocalTable();
+    }
+    function resetAndFilterLocal() {
+      localPage = 1;
+      filterLocalTable();
+    }
+    function changeLocalPageSize(val) {
+      localPageSize = Number(val) || 0;
+      localPage = 1;
+      filterLocalTable();
+    }
+    function goLocalPage(p) {
+      localPage = Math.max(1, Math.min(localTotalPages, p));
+      filterLocalTable();
+    }
+    function stepLocalPage(delta) {
+      goLocalPage(localPage + delta);
+    }
+    function goLocalLastPage() {
+      goLocalPage(localTotalPages);
+    }
+    function filterLocalTable() {
+      const rows = Array.from(document.querySelectorAll('.local-row'));
+      if (!rows.length) return;
+      const qEl = document.getElementById('localSearchInput');
+      const q = (qEl ? qEl.value : '').trim().toLowerCase();
+      const matched = [];
+      rows.forEach(row => {
+        const matchesFilter = currentLocalFilter === 'all' || row.classList.contains(currentLocalFilter);
+        const matchesQuery = !q || (row.getAttribute('data-search') || '').includes(q);
+        if (matchesFilter && matchesQuery) {
+          row.classList.remove('filter-hidden');
+          matched.push(row);
+        } else {
+          row.classList.add('filter-hidden');
+          row.classList.remove('page-hidden');
+        }
+      });
+
+      const total = matched.length;
+      localTotalPages = localPageSize > 0 ? Math.max(1, Math.ceil(total / localPageSize)) : 1;
+      if (localPage > localTotalPages) localPage = localTotalPages;
+      const startIdx = localPageSize > 0 ? (localPage - 1) * localPageSize : 0;
+      const endIdx = localPageSize > 0 ? Math.min(total, startIdx + localPageSize) : total;
+
+      matched.forEach((row, idx) => {
+        if (localPageSize > 0 && (idx < startIdx || idx >= endIdx)) {
+          row.classList.add('page-hidden');
+        } else {
+          row.classList.remove('page-hidden');
+        }
+      });
+
+      const rangeEl = document.getElementById('localRangeLabel');
+      if (rangeEl) {
+        rangeEl.textContent = total === 0 ? 'SHOWING 0 OF 0 FILES' : 'SHOWING ' + (startIdx + 1) + '–' + endIdx + ' OF ' + total.toLocaleString() + ' FILES';
+      }
+      const indEl = document.getElementById('localPageIndicator');
+      if (indEl) indEl.textContent = 'PAGE ' + localPage + ' OF ' + localTotalPages;
+      const firstBtn = document.getElementById('localFirstBtn');
+      const prevBtn = document.getElementById('localPrevBtn');
+      const nextBtn = document.getElementById('localNextBtn');
+      const lastBtn = document.getElementById('localLastBtn');
+      if (firstBtn) firstBtn.disabled = localPage <= 1;
+      if (prevBtn) prevBtn.disabled = localPage <= 1;
+      if (nextBtn) nextBtn.disabled = localPage >= localTotalPages;
+      if (lastBtn) lastBtn.disabled = localPage >= localTotalPages;
+    }
+
+    // Section 03: Chronological Timechain Ledger Pagination & Filtering
     function setPill(btn, filter) {
       currentFilter = filter;
-      document.querySelectorAll('.filter-tab').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('.ledger-filter-tab').forEach(el => el.classList.remove('active'));
       btn.classList.add('active');
+      ledgerPage = 1;
       filterLedger();
     }
+    function resetAndFilterLedger() {
+      ledgerPage = 1;
+      filterLedger();
+    }
+    function changeLedgerPageSize(val) {
+      ledgerPageSize = Number(val) || 0;
+      ledgerPage = 1;
+      filterLedger();
+    }
+    function goLedgerPage(p) {
+      ledgerPage = Math.max(1, Math.min(ledgerTotalPages, p));
+      filterLedger();
+    }
+    function stepLedgerPage(delta) {
+      goLedgerPage(ledgerPage + delta);
+    }
+    function goLedgerLastPage() {
+      goLedgerPage(ledgerTotalPages);
+    }
     function filterLedger() {
-      const q = (document.getElementById('searchInput').value || '').trim().toLowerCase();
-      document.querySelectorAll('.ledger-row').forEach(row => {
+      const rows = Array.from(document.querySelectorAll('.ledger-row'));
+      const qEl = document.getElementById('searchInput');
+      const q = (qEl ? qEl.value : '').trim().toLowerCase();
+      const matched = [];
+      rows.forEach(row => {
         const matchesFilter = currentFilter === 'all' || row.classList.contains(currentFilter);
         const matchesQuery = !q || (row.getAttribute('data-search') || '').includes(q);
-        row.style.display = (matchesFilter && matchesQuery) ? '' : 'none';
+        if (matchesFilter && matchesQuery) {
+          row.classList.remove('filter-hidden');
+          matched.push(row);
+        } else {
+          row.classList.add('filter-hidden');
+          row.classList.remove('page-hidden');
+        }
       });
+
+      const total = matched.length;
+      ledgerTotalPages = ledgerPageSize > 0 ? Math.max(1, Math.ceil(total / ledgerPageSize)) : 1;
+      if (ledgerPage > ledgerTotalPages) ledgerPage = ledgerTotalPages;
+      const startIdx = ledgerPageSize > 0 ? (ledgerPage - 1) * ledgerPageSize : 0;
+      const endIdx = ledgerPageSize > 0 ? Math.min(total, startIdx + ledgerPageSize) : total;
+
+      matched.forEach((row, idx) => {
+        if (ledgerPageSize > 0 && (idx < startIdx || idx >= endIdx)) {
+          row.classList.add('page-hidden');
+        } else {
+          row.classList.remove('page-hidden');
+        }
+      });
+
+      const rangeEl = document.getElementById('ledgerRangeLabel');
+      if (rangeEl) {
+        rangeEl.textContent = total === 0 ? 'SHOWING 0 OF 0 RECORDS' : 'SHOWING ' + (startIdx + 1) + '–' + endIdx + ' OF ' + total.toLocaleString() + ' RECORDS';
+      }
+      const indEl = document.getElementById('ledgerPageIndicator');
+      if (indEl) indEl.textContent = 'PAGE ' + ledgerPage + ' OF ' + ledgerTotalPages;
+      const firstBtn = document.getElementById('ledgerFirstBtn');
+      const prevBtn = document.getElementById('ledgerPrevBtn');
+      const nextBtn = document.getElementById('ledgerNextBtn');
+      const lastBtn = document.getElementById('ledgerLastBtn');
+      if (firstBtn) firstBtn.disabled = ledgerPage <= 1;
+      if (prevBtn) prevBtn.disabled = ledgerPage <= 1;
+      if (nextBtn) nextBtn.disabled = ledgerPage >= ledgerTotalPages;
+      if (lastBtn) lastBtn.disabled = ledgerPage >= ledgerTotalPages;
     }
+
+    filterLocalTable();
+    filterLedger();
   </script>
 </body>
 </html>`;
