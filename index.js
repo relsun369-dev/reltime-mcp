@@ -56,7 +56,7 @@ let LAST_INVOICE_PACK = null;
 
 const SERVER_INFO = {
   name: "rel-time-mcp-server",
-  version: "1.2.11",
+  version: "1.2.12",
 };
 
 /**
@@ -1527,6 +1527,18 @@ function generateAuditReportHtml(audit) {
 </html>`;
 }
 
+function formatBytes(bytes) {
+  if (bytes === undefined || bytes === null || Number.isNaN(Number(bytes))) {
+    return "Zero-Knowledge (32-Byte Digest)";
+  }
+  const b = Number(bytes);
+  if (b === 0) return "0 Bytes";
+  const k = 1024;
+  const sizes = ["Bytes", "KB", "MB", "GB", "TB"];
+  const i = Math.min(sizes.length - 1, Math.floor(Math.log(b) / Math.log(k)));
+  return `${parseFloat((b / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
+}
+
 function inferMimeTypeFromFileName(fileName) {
   if (!fileName || fileName === "Zero-Knowledge Hash Payload") {
     return "application/octet-stream (Zero-Knowledge)";
@@ -2112,6 +2124,49 @@ const TOOLS = [
     },
   },
   {
+    name: "reltime_anchor_folder",
+    description:
+      "Bulk zero-knowledge folder anchoring (10 to 5,000+ files in a single call): Hashes all files in a local folder 100% locally (0 file bytes uploaded), supports Biometric (Passkey) or Anonymous anchoring, skips any files that are already anchored (safe to resume), and keeps the user's folder clean by storing per-file Doomsday Proofs inside a single `_reltime_proofs/` subfolder plus a master `reltime-batch-manifest.json`.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        folder_path: {
+          type: "string",
+          description: "Absolute path to the local directory to hash and anchor.",
+        },
+        recursive: {
+          type: "boolean",
+          description: "If true, recursively anchors files in subdirectories. Defaults to false (top-level files only).",
+        },
+        biometric: {
+          type: "boolean",
+          description:
+            "If true, performs Biometric Anchors using your linked hardware Passkey (`~/.reltime/passkey.json`) across the entire folder without repeated TouchID prompts.",
+        },
+        anchor_mode: {
+          type: "string",
+          enum: ["standard", "temporal"],
+          description: "Use 'standard' (default) or 'temporal' (VDF T_index sequential ordering for Superhighway & Autonomous Agents).",
+        },
+        artifact_mode: {
+          type: "string",
+          enum: ["proofs_subfolder", "manifest_only", "full"],
+          description:
+            "Controls local output files so bulk runs never clutter the folder: 'proofs_subfolder' (default) writes JSON proofs into `<folder>/_reltime_proofs/` + `reltime-batch-manifest.json`; 'manifest_only' writes only `reltime-batch-manifest.json`; 'full' also writes SVG Sun-Stamps and HTML certificates.",
+        },
+        concurrency: {
+          type: "number",
+          description: "Number of concurrent anchor requests (default: 5, max: 10).",
+        },
+        api_key: {
+          type: "string",
+          description: "Optional override for RELTIME_API_KEY.",
+        },
+      },
+      required: ["folder_path"],
+    },
+  },
+  {
     name: "reltime_link_passkey",
     description:
       "Links the user's hardware Passkey (TouchID, FaceID, or YubiKey) to `@rel-time/mcp-server` for Biometric Anchors. Opens `https://rel-time.com/mcp-passkey` in the system browser, waits for the user's biometric touch, and saves `{ public_key_hex, passkey_signature }` to `~/.reltime/passkey.json`.",
@@ -2450,12 +2505,27 @@ async function executeTool(name, args = {}) {
     const verifyUrl = `https://rel-time.com/verify?t=${lookupHash}`;
     const stampEndpointUrl = `${API_BASE}/stamp/${lookupHash}`;
 
-    const svgContent = data.visual_fingerprint || (await (await fetch(stampEndpointUrl)).text());
+    let svgContent = data.visual_fingerprint || "";
+    const needsSvg = args.save_sun_stamp_svg !== false || args.save_stamped_copy !== false;
+    if (!svgContent && needsSvg) {
+      try {
+        const stampRes = await fetch(stampEndpointUrl);
+        if (stampRes.ok) {
+          svgContent = await stampRes.text();
+        }
+      } catch (e) {
+        // Ignore SVG fetch error if offline/rate-limited
+      }
+    }
 
     let savedSvgPath = null;
-    if (args.save_sun_stamp_svg !== false) {
-      savedSvgPath = path.join(path.dirname(filePath), `reltime-stamp-${path.basename(filePath)}.svg`);
-      fs.writeFileSync(savedSvgPath, svgContent, "utf8");
+    if (args.save_sun_stamp_svg !== false && svgContent) {
+      try {
+        savedSvgPath = path.join(path.dirname(filePath), `reltime-stamp-${path.basename(filePath)}.svg`);
+        fs.writeFileSync(savedSvgPath, svgContent, "utf8");
+      } catch (e) {
+        savedSvgPath = null;
+      }
     }
 
     // Save initial Doomsday Proof JSON alongside the file
@@ -2489,40 +2559,48 @@ async function executeTool(name, args = {}) {
 
     // 3. Automatically generate Stamped Copy (.PDF or .PNG) for PDFs and Images
     let stampedCopyResult = null;
-    if (args.save_stamped_copy !== false) {
-      stampedCopyResult = await stampLocalFileOptionA(filePath, svgContent, null, clientHash);
+    if (args.save_stamped_copy !== false && svgContent) {
+      try {
+        stampedCopyResult = await stampLocalFileOptionA(filePath, svgContent, null, clientHash);
+      } catch (e) {
+        stampedCopyResult = { status: "skipped", error: e.message };
+      }
     }
 
     // 4. Generate 4-Plate Sovereign Cryptographic Provenance Certificate HTML
     let savedCertificateHtmlPath = null;
     if (args.save_certificate_html !== false) {
-      const certHtml = generateProvenanceCertificateHtml({
-        fileName: path.basename(filePath),
-        fileSize: formatBytes(fileBuffer.length),
-        mimeType: inferMimeTypeFromFileName(path.basename(filePath)),
-        originalFileHash,
-        attestedHash: clientHash,
-        signerPublicKey: passkeyCreds ? passkeyCreds.public_key_hex : null,
-        anchorMode: data.anchor_mode || anchorMode,
-        tIndex,
-        vdfTicks: data.vdf_ticks || data.solar_ticks || 0,
-        status: data.status || "pending_finality",
-        blockHeight: data.settlement?.bitcoin_block_height || null,
-        blockTimeUtc: data.settlement?.bitcoin_block_time
-          ? new Date(data.settlement.bitcoin_block_time * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC"
-          : null,
-        merkleProofCount: Array.isArray(data.settlement?.merkle_proof_path)
-          ? data.settlement.merkle_proof_path.length
-          : null,
-        txid: data.settlement?.bitcoin_txid || null,
-      });
-      savedCertificateHtmlPath = path.join(
-        path.dirname(filePath),
-        `reltime-certificate-${path.basename(filePath)}.html`
-      );
-      fs.writeFileSync(savedCertificateHtmlPath, certHtml, "utf8");
-      if (args.open_certificate_in_browser) {
-        openSystemBrowser(savedCertificateHtmlPath);
+      try {
+        const certHtml = generateProvenanceCertificateHtml({
+          fileName: path.basename(filePath),
+          fileSize: formatBytes(fileBuffer.length),
+          mimeType: inferMimeTypeFromFileName(path.basename(filePath)),
+          originalFileHash,
+          attestedHash: clientHash,
+          signerPublicKey: passkeyCreds ? passkeyCreds.public_key_hex : null,
+          anchorMode: data.anchor_mode || anchorMode,
+          tIndex,
+          vdfTicks: data.vdf_ticks || data.solar_ticks || 0,
+          status: data.status || "pending_finality",
+          blockHeight: data.settlement?.bitcoin_block_height || null,
+          blockTimeUtc: data.settlement?.bitcoin_block_time
+            ? new Date(data.settlement.bitcoin_block_time * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC"
+            : null,
+          merkleProofCount: Array.isArray(data.settlement?.merkle_proof_path)
+            ? data.settlement.merkle_proof_path.length
+            : null,
+          txid: data.settlement?.bitcoin_txid || null,
+        });
+        savedCertificateHtmlPath = path.join(
+          path.dirname(filePath),
+          `reltime-certificate-${path.basename(filePath)}.html`
+        );
+        fs.writeFileSync(savedCertificateHtmlPath, certHtml, "utf8");
+        if (args.open_certificate_in_browser) {
+          openSystemBrowser(savedCertificateHtmlPath);
+        }
+      } catch (e) {
+        savedCertificateHtmlPath = null;
       }
     }
 
@@ -2545,6 +2623,203 @@ async function executeTool(name, args = {}) {
       stamped_copy: stampedCopyResult,
       zero_knowledge_guarantee:
         "File was hashed and stamped 100% locally on your machine; 0 bytes of file content were transmitted.",
+    };
+  }
+
+  if (name === "reltime_anchor_folder") {
+    if (!key) {
+      return buildPackSelectionPrompt(
+        "Before anchoring a folder of files, a Rel-Time API key is required. Ask the user which pack they want to provision first:"
+      );
+    }
+    const folderPath = resolveLocalFilePath(args.folder_path);
+    if (!fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) {
+      throw new Error(`Directory not found at path: ${folderPath}`);
+    }
+
+    const recursive = Boolean(args.recursive);
+    const anchorMode = args.anchor_mode || "standard";
+    const artifactMode = args.artifact_mode || "proofs_subfolder";
+    const concurrency = Math.max(1, Math.min(10, Number(args.concurrency) || 5));
+
+    let passkeyCreds = null;
+    if (args.biometric) {
+      passkeyCreds = loadSavedPasskey();
+      if (!passkeyCreds) {
+        passkeyCreds = await launchBrowserPasskeyBridge();
+      }
+    }
+
+    const isReltimeGeneratedFile = (fname) => {
+      const lower = fname.toLowerCase();
+      return (
+        fname.startsWith(".") ||
+        lower.startsWith("reltime-stamp-") ||
+        lower.startsWith("reltime-doomsday-proof-") ||
+        lower.startsWith("reltime-certificate-") ||
+        lower.startsWith("reltime-stamped-") ||
+        lower.startsWith("reltime-audit-report-") ||
+        lower === "reltime-batch-manifest.json"
+      );
+    };
+
+    const targetFiles = [];
+    const walkDir = (dir) => {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.name.startsWith(".") || entry.name === "_reltime_proofs" || entry.name === "node_modules") {
+          continue;
+        }
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (recursive) walkDir(fullPath);
+        } else if (entry.isFile() && !isReltimeGeneratedFile(entry.name)) {
+          targetFiles.push(fullPath);
+        }
+      }
+    };
+    walkDir(folderPath);
+
+    const proofsDir = path.join(folderPath, "_reltime_proofs");
+    if (artifactMode === "proofs_subfolder" && !fs.existsSync(proofsDir)) {
+      fs.mkdirSync(proofsDir, { recursive: true });
+    }
+
+    const manifestPath = path.join(folderPath, "reltime-batch-manifest.json");
+    let existingManifest = { anchored_files: {} };
+    if (fs.existsSync(manifestPath)) {
+      try {
+        existingManifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) || { anchored_files: {} };
+        if (!existingManifest.anchored_files) existingManifest.anchored_files = {};
+      } catch (e) {
+        existingManifest = { anchored_files: {} };
+      }
+    }
+
+    const results = [];
+    const skipped = [];
+    const errors = [];
+    let outOfCredits = false;
+
+    const toProcess = [];
+    for (const fPath of targetFiles) {
+      const relPath = path.relative(folderPath, fPath);
+      const baseName = path.basename(fPath);
+      const sidecarProof = path.join(path.dirname(fPath), `reltime-doomsday-proof-${baseName}.json`);
+      const subfolderProof = path.join(proofsDir, `reltime-doomsday-proof-${relPath.replace(/[\\/]/g, "__")}.json`);
+      if (existingManifest.anchored_files[relPath] || fs.existsSync(sidecarProof) || fs.existsSync(subfolderProof)) {
+        skipped.push(relPath);
+      } else {
+        toProcess.push({ fPath, relPath, baseName, subfolderProof });
+      }
+    }
+
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < toProcess.length && !outOfCredits) {
+        const idx = cursor++;
+        const item = toProcess[idx];
+        if (!item) break;
+        try {
+          const buf = fs.readFileSync(item.fPath);
+          const originalFileHash = crypto.createHash("sha256").update(buf).digest("hex");
+          const clientHash =
+            args.biometric && passkeyCreds
+              ? crypto.createHash("sha256").update(`${originalFileHash}${passkeyCreds.public_key_hex}`, "utf8").digest("hex")
+              : originalFileHash;
+
+          const reqBody = {
+            client_hash: clientHash,
+            anchor_mode: anchorMode,
+          };
+          if (args.biometric && passkeyCreds) {
+            reqBody.original_file_hash = originalFileHash;
+            reqBody.passkey_signature = passkeyCreds.passkey_signature;
+          }
+
+          const res = await fetch(`${API_BASE}/anchor`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${key}`,
+            },
+            body: JSON.stringify(reqBody),
+          });
+
+          if (res.status === 402) {
+            outOfCredits = true;
+            errors.push({ file: item.relPath, error: "Insufficient Hash Credits (HTTP 402)" });
+            break;
+          }
+
+          const data = await res.json();
+          if (!res.ok) {
+            errors.push({ file: item.relPath, error: `HTTP ${res.status}: ${JSON.stringify(data)}` });
+            continue;
+          }
+
+          const tIndex = data.t_index || data.thermodynamic_proof;
+          const lookupHash = (data.anchor_mode || anchorMode) === "temporal" ? tIndex : clientHash;
+          const verifyUrl = `https://rel-time.com/verify?t=${lookupHash}`;
+          const proofRecord = {
+            protocol: "Rel-Time Sovereign Provenance Protocol",
+            file_name: item.baseName,
+            relative_path: item.relPath,
+            identity_mode: args.biometric ? "BIOMETRIC_PASSKEY" : "ANONYMOUS",
+            original_file_sha256_hash: originalFileHash,
+            anchored_client_hash: clientHash,
+            signer_public_key: passkeyCreds ? passkeyCreds.public_key_hex : null,
+            t_index: tIndex,
+            vdf_ticks: data.vdf_ticks || data.solar_ticks,
+            anchor_mode: data.anchor_mode || anchorMode,
+            status: data.status || "pending_finality",
+            verify_url: verifyUrl,
+          };
+
+          if (artifactMode === "proofs_subfolder") {
+            fs.writeFileSync(item.subfolderProof, JSON.stringify(proofRecord, null, 2), "utf8");
+          } else if (artifactMode === "full") {
+            const sidecarPath = path.join(path.dirname(item.fPath), `reltime-doomsday-proof-${item.baseName}.json`);
+            fs.writeFileSync(sidecarPath, JSON.stringify(proofRecord, null, 2), "utf8");
+          }
+
+          existingManifest.anchored_files[item.relPath] = proofRecord;
+          results.push(proofRecord);
+        } catch (err) {
+          errors.push({ file: item.relPath, error: err.message });
+        }
+      }
+    };
+
+    const workers = Array.from({ length: Math.min(concurrency, Math.max(1, toProcess.length)) }, () => worker());
+    await Promise.all(workers);
+
+    const manifestPayload = {
+      protocol: "Rel-Time Sovereign Provenance Protocol — Batch Folder Manifest",
+      folder_path: folderPath,
+      updated_at: new Date().toISOString(),
+      identity_mode: args.biometric ? "BIOMETRIC_PASSKEY" : "ANONYMOUS",
+      signer_public_key: passkeyCreds ? passkeyCreds.public_key_hex : null,
+      total_anchored_in_manifest: Object.keys(existingManifest.anchored_files).length,
+      anchored_files: existingManifest.anchored_files,
+    };
+    fs.writeFileSync(manifestPath, JSON.stringify(manifestPayload, null, 2), "utf8");
+
+    return {
+      status: outOfCredits ? "stopped_insufficient_credits" : "completed",
+      folder_path: folderPath,
+      total_files_found: targetFiles.length,
+      newly_anchored_count: results.length,
+      skipped_already_anchored_count: skipped.length,
+      error_count: errors.length,
+      identity_mode: args.biometric ? "BIOMETRIC_PASSKEY" : "ANONYMOUS",
+      signer_public_key: passkeyCreds ? passkeyCreds.public_key_hex : null,
+      artifact_mode: artifactMode,
+      manifest_path: manifestPath,
+      proofs_subfolder: artifactMode === "proofs_subfolder" ? proofsDir : null,
+      errors: errors.slice(0, 20),
+      next_step:
+        "You can now run `reltime_audit_trail` with `verify_local_path` set to this folder to generate the full interactive HTML Cryptographic Audit Report.",
     };
   }
 
@@ -2813,7 +3088,7 @@ async function executeTool(name, args = {}) {
       };
     }
 
-    const maxEntries = Math.min(500, Math.max(1, Number(args.limit) || 100));
+    const maxEntries = Math.min(5000, Math.max(1, Number(args.limit) || 2000));
     const pageSize = Math.min(100, maxEntries);
     const pagesToFetch = Math.ceil(maxEntries / pageSize);
     let rawHistory = [];
@@ -2959,7 +3234,10 @@ async function executeTool(name, args = {}) {
             item.startsWith("reltime-stamp-") ||
             item.startsWith("reltime-doomsday-proof-") ||
             item.startsWith("reltime-proof-") ||
-            item.startsWith("reltime-audit-report-")
+            item.startsWith("reltime-certificate-") ||
+            item.startsWith("reltime-audit-report-") ||
+            item === "reltime-batch-manifest.json" ||
+            item === "_reltime_proofs"
           ) {
             continue;
           }
